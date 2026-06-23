@@ -77,14 +77,16 @@ async function tryOCRSpace(imageUrl, sourceLang) {
 
  const urlPayload = {
    apikey: OCR_SPACE_KEY, url: imageUrl, language: lang,
-   isOverlayRequired: "true", OCREngine: getEngine(lang),
-   scale: "true", detectOrientation: "true", filetype: "auto",
+   isOverlayRequired: "true", OCREngine: getEngine(lang), scale: "true",
  };
 
+ // Try URL method first
  let data = await ocrSpaceRequest(urlPayload);
- if (!data) {
+
+ // Fall back to base64 if URL method failed or returned errored
+ if (!data || data.IsErroredOnProcessing) {
    const img = await fetchWithTimeout(imageUrl, {}, 15000);
-   if (!img) return null;
+   if (!img) return parseOCR(data); // return what we have (null or errored)
 
    const buf = Buffer.from(await img.arrayBuffer());
    const base64 = buf.toString("base64");

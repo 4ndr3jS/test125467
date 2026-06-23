@@ -26,13 +26,13 @@
      let boxes = [];
      const engines = [];
 
-     if (isJP && ok(manga)?.text) { text = manga.value.text; engines.push("manga"); }
-     if (!text && ok(ocrS)?.text) { text = ocrS.value.text; engines.push("ocrspace"); }
-     if (!text && ok(tess)?.text) { text = tess.value.text; engines.push("tesseract"); }
+     if (isJP && ok(manga) && manga.value?.text) { text = manga.value.text; engines.push("manga"); }
+     if (!text && ok(ocrS) && ocrS.value?.text) { text = ocrS.value.text; engines.push("ocrspace"); }
+     if (!text && ok(tess) && tess.value?.text) { text = tess.value.text; engines.push("tesseract"); }
 
-     if (ok(ocrS)?.boxes?.length) {
+     if (ok(ocrS) && ocrS.value?.boxes?.length) {
        boxes = ocrS.value.boxes;
-     } else if (ok(tess)?.boxes?.length) {
+     } else if (ok(tess) && tess.value?.boxes?.length) {
        boxes = tess.value.boxes;
      }
 

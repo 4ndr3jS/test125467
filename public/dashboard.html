@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard — Kage</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header class="navbar" id="navbar"></header>
+
+  <main class="container">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;" class="mt-4 mb-2">
+      <div>
+        <h1 style="margin-bottom:0.2rem;">Dashboard</h1>
+        <p class="text-muted">Your translated images and history</p>
+      </div>
+      <div style="display:flex;gap:0.5rem;">
+        <a href="/upload.html" class="btn btn-primary">📤 New Upload</a>
+        <button class="btn btn-secondary" id="dashboard-refresh-btn">🔄 Refresh</button>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div id="dashboard-stats" class="mb-3" style="display:flex;gap:1rem;flex-wrap:wrap;"></div>
+
+    <!-- Image grid -->
+    <div class="dashboard-grid" id="dashboard-grid"></div>
+
+    <!-- Loading -->
+    <div id="dashboard-loading" class="empty-state">
+      <span class="spinner"></span>
+      <p class="text-muted mt-2">Loading your images...</p>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p>Kage <span style="color:var(--red-primary);">影</span> — AI Manga Translator</p>
+  </footer>
+
+  <div class="toast-container" id="toast-container"></div>
+
+  <script>
+    window.ENV = {
+      SUPABASE_URL: "https://uhmeslocosmhnsvgecuh.supabase.co",
+      SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVobWVzbG9jb3NtaG5zdmdlY3VoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNTY0NDUsImV4cCI6MjA5NzczMjQ0NX0.o3VlCyJknFBnDvP6vy6FB7-eEkKLcuXAb5hN-Gxj1XQ",
+    };
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <!-- Tesseract.js for client-side OCR -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="/js/auth.js"></script>
+  <script src="/js/ocr-client.js"></script>
+  <script src="/js/inpaint-client.js"></script>
+  <script src="/js/pipeline.js"></script>
+  <script src="/js/dashboard.js"></script>
+
+  <script>
+    (async function () {
+      const user = await KageAuth.requireAuth();
+      if (!user) return;
+
+      await KageAuth.renderNavbar("navbar", "dashboard");
+
+      // Load dashboard
+      await loadAll();
+
+      // Refresh button
+      document.getElementById("dashboard-refresh-btn")?.addEventListener("click", async () => {
+        document.getElementById("dashboard-grid").innerHTML = "";
+        document.getElementById("dashboard-loading").style.display = "";
+        document.getElementById("dashboard-stats").innerHTML = "";
+        await loadAll();
+      });
+    })();
+
+    async function loadAll() {
+      const user = KageAuth.getUser();
+      if (!user) return;
+
+      const client = KageAuth.getSupabaseClient();
+      if (!client) return;
+
+      document.getElementById("dashboard-loading").style.display = "";
+
+      // Fetch all images
+      const { data, error } = await client
+        .from("images")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(100);
+
+      document.getElementById("dashboard-loading").style.display = "none";
+
+      if (error) {
+        document.getElementById("dashboard-grid").innerHTML = `
+          <div class="empty-state" style="grid-column:1/-1;">
+            <span class="empty-state-icon">⚠️</span>
+            <h3>Failed to load</h3>
+            <p class="text-muted">${escapeHTML(error.message)}</p>
+          </div>`;
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        document.getElementById("dashboard-stats").innerHTML = "";
+        document.getElementById("dashboard-grid").innerHTML = `
+          <div class="empty-state" style="grid-column:1/-1;">
+            <span class="empty-state-icon">📭</span>
+            <h3>No images yet</h3>
+            <p class="text-muted">Upload some manga pages to get started!</p>
+            <a href="/upload.html" class="btn btn-primary mt-2">Upload Images</a>
+          </div>`;
+        return;
+      }
+
+      // Render stats
+      const completed = data.filter((i) => i.status === "completed").length;
+      const processing = data.filter((i) => !["completed", "failed", "uploaded"].includes(i.status)).length;
+      const failed = data.filter((i) => i.status === "failed").length;
+
+      document.getElementById("dashboard-stats").innerHTML = `
+        <div class="card" style="flex:1;min-width:120px;text-align:center;padding:1rem;">
+          <div style="font-size:1.8rem;font-weight:800;color:var(--text-primary);">${data.length}</div>
+          <div style="font-size:0.8rem;color:var(--text-muted);">Total Images</div>
+        </div>
+        <div class="card" style="flex:1;min-width:120px;text-align:center;padding:1rem;">
+          <div style="font-size:1.8rem;font-weight:800;color:#22c55e;">${completed}</div>
+          <div style="font-size:0.8rem;color:var(--text-muted);">Completed</div>
+        </div>
+        <div class="card" style="flex:1;min-width:120px;text-align:center;padding:1rem;">
+          <div style="font-size:1.8rem;font-weight:800;color:#facc15;">${processing}</div>
+          <div style="font-size:0.8rem;color:var(--text-muted);">Processing</div>
+        </div>
+        <div class="card" style="flex:1;min-width:120px;text-align:center;padding:1rem;">
+          <div style="font-size:1.8rem;font-weight:800;color:#ef4444;">${failed}</div>
+          <div style="font-size:0.8rem;color:var(--text-muted);">Failed</div>
+        </div>
+      `;
+
+      // Render image cards
+      renderImageCards(data);
+    }
+
+    function renderImageCards(images) {
+      const grid = document.getElementById("dashboard-grid");
+
+      grid.innerHTML = images
+        .map((img) => {
+          const statusLabel = getStatusLabel(img.status);
+          const statusClass = getStatusClass(img.status);
+          const date = formatDate(img.created_at);
+          const previewUrl = img.translated_url || img.original_url || "";
+          const hasTranslated = img.status === "completed" && img.translated_url;
+
+          return `
+          <div class="image-card" data-id="${img.id}">
+            <img
+              class="image-card-img"
+              src="${previewUrl}"
+              alt="${escapeHTML(img.original_name || "Image")}"
+              loading="lazy"
+              onerror="this.style.background='var(--bg-surface)';this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22300%22 height=%22400%22><rect fill=%22%2316161c%22 width=%22300%22 height=%22400%22/><text fill=%22%235c5860%22 x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 dy=%22.3em%22 font-size=%2216%22>No Preview</text></svg>';"
+            />
+            <div class="image-card-body">
+              <div class="image-card-name" title="${escapeHTML(img.original_name || "Untitled")}">
+                ${escapeHTML(img.original_name || "Untitled")}
+              </div>
+              <div class="image-card-meta">
+                <span class="status-badge ${statusClass}">${statusLabel}</span>
+                <span>${date}</span>
+              </div>
+            </div>
+            <div class="image-card-actions">
+              <button class="btn btn-secondary btn-sm preview-btn" data-id="${img.id}">👁 View</button>
+              ${hasTranslated
+                ? `<a href="${img.translated_url}" class="btn btn-primary btn-sm" download>⬇ DL</a>`
+                : img.status === "failed"
+                  ? `<button class="btn btn-danger btn-sm retry-btn" data-id="${img.id}">🔄 Retry</button>`
+                  : `<button class="btn btn-ghost btn-sm" disabled>⏳</button>`
+              }
+              <button class="btn btn-danger btn-sm delete-btn" data-id="${img.id}" title="Delete">🗑</button>
+            </div>
+          </div>`;
+        })
+        .join("");
+
+      // Bind preview buttons
+      grid.querySelectorAll(".preview-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const img = images.find((i) => i.id === btn.dataset.id);
+          if (img) showPreviewModal(img);
+        });
+      });
+
+      // Bind retry buttons
+      grid.querySelectorAll(".retry-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const img = images.find((i) => i.id === btn.dataset.id);
+          if (!img) return;
+          showToast("Retrying...", "");
+          const targetLang = localStorage.getItem("kage_target_lang") || img.target_lang || "en";
+          const fontStyle = localStorage.getItem("kage_font_style") || img.font_style || "anime";
+          await KagePipeline.processImage(img, { sourceLang: img.source_lang || "ja", targetLang, fontStyle });
+          await loadAll();
+          showToast("Retry complete!", "success");
+        });
+      });
+
+      // Bind delete buttons
+      grid.querySelectorAll(".delete-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("Delete this image? This cannot be undone.")) return;
+          const user = KageAuth.getUser();
+          const result = await KageDashboard.deleteImage(btn.dataset.id, user?.id);
+          if (result?.error) {
+            showToast(`Delete failed: ${result.error}`, "error");
+          } else {
+            showToast("Image deleted.", "success");
+            await loadAll();
+          }
+        });
+      });
+    }
+
+    function showPreviewModal(image) {
+      const existing = document.querySelector(".modal-overlay");
+      if (existing) existing.remove();
+
+      const hasBoth = image.status === "completed" && image.translated_url;
+
+      const overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      overlay.innerHTML = `
+        <div class="modal">
+          <h3>${escapeHTML(image.original_name || "Image")}</h3>
+          <div class="result-comparison" style="${hasBoth ? "" : "grid-template-columns: 1fr;"}">
+            <div class="result-pane">
+              <div class="result-pane-header">Original</div>
+              <img src="${image.original_url}" alt="Original" />
+            </div>
+            ${hasBoth ? `
+            <div class="result-pane">
+              <div class="result-pane-header">Translated</div>
+              <img src="${image.translated_url}" alt="Translated" />
+            </div>` : ""}
+          </div>
+          ${image.ocr_text ? `
+          <div class="mt-2">
+            <p class="text-muted" style="font-size:0.8rem;">OCR Text:</p>
+            <p style="font-size:0.85rem;background:var(--bg-surface);padding:0.5rem;border-radius:var(--radius-sm);max-height:100px;overflow-y:auto;white-space:pre-wrap;">${escapeHTML(image.ocr_text)}</p>
+          </div>` : ""}
+          ${image.translated_text ? `
+          <div class="mt-1">
+            <p class="text-muted" style="font-size:0.8rem;">Translation:</p>
+            <p style="font-size:0.85rem;background:var(--bg-surface);padding:0.5rem;border-radius:var(--radius-sm);max-height:100px;overflow-y:auto;white-space:pre-wrap;">${escapeHTML(image.translated_text)}</p>
+          </div>` : ""}
+          <div class="modal-actions">
+            ${image.translated_url ? `<a href="${image.translated_url}" class="btn btn-primary btn-sm" download>⬇ Download Translated</a>` : ""}
+            <a href="${image.original_url}" class="btn btn-secondary btn-sm" download>⬇ Download Original</a>
+            <button class="btn btn-ghost btn-sm close-modal">Close</button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(overlay);
+
+      overlay.querySelector(".close-modal").addEventListener("click", () => overlay.remove());
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) overlay.remove();
+      });
+    }
+
+    // --- Pipeline module is needed for retry ---
+    // Load it dynamically
+    function ensurePipeline() {
+      if (window.KagePipeline) return Promise.resolve();
+      return new Promise((resolve) => {
+        const script = document.createElement("script");
+        script.src = "/js/pipeline.js";
+        script.onload = resolve;
+        document.head.appendChild(script);
+      });
+    }
+
+    // Load pipeline if not already loaded
+    if (!window.KagePipeline) {
+      const script = document.createElement("script");
+      script.src = "/js/pipeline.js";
+      document.head.appendChild(script);
+    }
+
+    function getStatusLabel(status) {
+      const map = {
+        uploaded: "Uploaded",
+        processing: "Processing",
+        ocr_done: "OCR Done",
+        translating: "Translating",
+        translating_done: "Translated",
+        inpainting: "Cleaning",
+        inpainting_done: "Cleaned",
+        rendering: "Rendering",
+        completed: "Completed",
+        failed: "Failed",
+      };
+      return map[status] || status || "Unknown";
+    }
+
+    function getStatusClass(status) {
+      if (status === "completed") return "completed";
+      if (status === "failed") return "failed";
+      if (status === "uploaded") return "uploaded";
+      return "processing";
+    }
+
+    function formatDate(isoString) {
+      if (!isoString) return "";
+      const d = new Date(isoString);
+      const now = new Date();
+      const diffMs = now - d;
+      const diffMins = Math.floor(diffMs / 60000);
+      const diffHours = Math.floor(diffMs / 3600000);
+      const diffDays = Math.floor(diffMs / 86400000);
+
+      if (diffMins < 1) return "Just now";
+      if (diffMins < 60) return `${diffMins}m ago`;
+      if (diffHours < 24) return `${diffHours}h ago`;
+      if (diffDays < 7) return `${diffDays}d ago`;
+
+      return d.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined,
+      });
+    }
+
+    function showToast(message, type) {
+      const container = document.getElementById("toast-container");
+      if (!container) return;
+      const toast = document.createElement("div");
+      toast.className = `toast ${type || ""}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = "0";
+        toast.style.transition = "opacity 0.3s";
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+
+    function escapeHTML(str) {
+      const div = document.createElement("div");
+      div.textContent = str || "";
+      return div.innerHTML;
+    }
+  </script>
+</body>
+</html>

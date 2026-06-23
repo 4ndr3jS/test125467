@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Settings — Kage</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Serif+JP:wght@400;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header class="navbar" id="navbar"></header>
+
+  <main class="container" style="max-width:720px;">
+    <h1 class="mt-4" style="margin-bottom:0.2rem;">Settings</h1>
+    <p class="text-muted mb-3">Customize your translation preferences and account.</p>
+
+    <!-- Translation Settings -->
+    <section class="settings-section card">
+      <div class="card-header">
+        <span class="card-title">🌐 Translation Defaults</span>
+      </div>
+
+      <div class="settings-grid">
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label" for="settings-source-lang">Default Source Language</label>
+          <select class="form-input" id="settings-source-lang">
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese (Simplified)</option>
+            <option value="zh-TW">Chinese (Traditional)</option>
+            <option value="en">English</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="es">Spanish</option>
+            <option value="pt">Portuguese</option>
+            <option value="ru">Russian</option>
+            <option value="ar">Arabic</option>
+            <option value="auto">Auto Detect</option>
+          </select>
+          <p class="form-hint">Language of the text in uploaded images.</p>
+        </div>
+
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label" for="settings-target-lang">Default Target Language</label>
+          <select class="form-input" id="settings-target-lang">
+            <option value="en">English</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese (Simplified)</option>
+            <option value="zh-TW">Chinese (Traditional)</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="es">Spanish</option>
+            <option value="pt">Portuguese</option>
+            <option value="ru">Russian</option>
+            <option value="ar">Arabic</option>
+            <option value="it">Italian</option>
+            <option value="nl">Dutch</option>
+            <option value="pl">Polish</option>
+            <option value="vi">Vietnamese</option>
+            <option value="th">Thai</option>
+            <option value="id">Indonesian</option>
+          </select>
+          <p class="form-hint">Language to translate text into.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Font Style -->
+    <section class="settings-section card mt-3">
+      <div class="card-header">
+        <span class="card-title">🎨 Font Style for Rendered Text</span>
+      </div>
+      <p class="section-desc">Choose how translated text looks when rendered back onto images.</p>
+
+      <div class="font-preview-grid" id="font-style-grid">
+        <div class="font-option" data-font="anime">
+          <div class="font-sample anime">Aa あア</div>
+          <div class="font-name">Anime / Comic</div>
+        </div>
+        <div class="font-option" data-font="manga">
+          <div class="font-sample manga">Aa あア</div>
+          <div class="font-name">Manga Bold</div>
+        </div>
+        <div class="font-option" data-font="mincho">
+          <div class="font-sample mincho">Aa あア</div>
+          <div class="font-name">Mincho Serif</div>
+        </div>
+        <div class="font-option" data-font="gothic">
+          <div class="font-sample gothic">Aa あア</div>
+          <div class="font-name">Gothic Sans</div>
+        </div>
+        <div class="font-option" data-font="hand">
+          <div class="font-sample hand">Aa あア</div>
+          <div class="font-name">Handwritten</div>
+        </div>
+        <div class="font-option" data-font="pixel">
+          <div class="font-sample pixel">Aa あア</div>
+          <div class="font-name">Pixel / Mono</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Account -->
+    <section class="settings-section card mt-3">
+      <div class="card-header">
+        <span class="card-title">👤 Account</span>
+      </div>
+
+      <div id="account-info">
+        <p class="text-muted" style="font-size:0.85rem;">Loading account info...</p>
+      </div>
+
+      <div class="mt-2">
+        <button class="btn btn-danger" id="settings-logout-btn">
+          🚪 Sign Out
+        </button>
+      </div>
+    </section>
+
+    <!-- Danger Zone -->
+    <section class="settings-section card mt-3" style="border-color:var(--red-dark);">
+      <div class="card-header">
+        <span class="card-title" style="color:var(--red-hover);">⚠️ Danger Zone</span>
+      </div>
+
+      <p class="text-muted" style="font-size:0.85rem;margin-bottom:1rem;">
+        Permanently delete all your images and data from Kage. This action cannot be undone.
+      </p>
+
+      <button class="btn btn-danger" id="settings-delete-all-btn">
+        🗑 Delete All My Images
+      </button>
+    </section>
+
+    <!-- Save confirmation -->
+    <div id="settings-saved-msg" class="hidden mt-2 text-center" style="color:#22c55e;font-weight:600;">
+      ✅ Settings saved!
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p>Kage <span style="color:var(--red-primary);">影</span> — AI Manga Translator</p>
+  </footer>
+
+  <div class="toast-container" id="toast-container"></div>
+
+  <script>
+    window.ENV = {
+      SUPABASE_URL: "https://uhmeslocosmhnsvgecuh.supabase.co",
+      SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVobWVzbG9jb3NtaG5zdmdlY3VoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNTY0NDUsImV4cCI6MjA5NzczMjQ0NX0.o3VlCyJknFBnDvP6vy6FB7-eEkKLcuXAb5hN-Gxj1XQ",
+    };
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="/js/auth.js"></script>
+
+  <script>
+    (async function () {
+      const user = await KageAuth.requireAuth();
+      if (!user) return;
+
+      await KageAuth.renderNavbar("navbar", "settings");
+
+      // Load saved settings
+      const savedSource = localStorage.getItem("kage_source_lang") || "ja";
+      const savedTarget = localStorage.getItem("kage_target_lang") || "en";
+      const savedFont = localStorage.getItem("kage_font_style") || "anime";
+
+      document.getElementById("settings-source-lang").value = savedSource;
+      document.getElementById("settings-target-lang").value = savedTarget;
+
+      // Font selection
+      const fontGrid = document.getElementById("font-style-grid");
+      fontGrid.querySelectorAll(".font-option").forEach((opt) => {
+        if (opt.dataset.font === savedFont) {
+          opt.classList.add("selected");
+        }
+
+        opt.addEventListener("click", () => {
+          fontGrid.querySelectorAll(".font-option").forEach((o) => o.classList.remove("selected"));
+          opt.classList.add("selected");
+          localStorage.setItem("kage_font_style", opt.dataset.font);
+          showSettingsSaved();
+        });
+      });
+
+      // Save language settings on change
+      document.getElementById("settings-source-lang").addEventListener("change", (e) => {
+        localStorage.setItem("kage_source_lang", e.target.value);
+        showSettingsSaved();
+      });
+
+      document.getElementById("settings-target-lang").addEventListener("change", (e) => {
+        localStorage.setItem("kage_target_lang", e.target.value);
+        showSettingsSaved();
+      });
+
+      // Account info
+      const accountInfo = document.getElementById("account-info");
+      if (user) {
+        const created = user.created_at ? new Date(user.created_at).toLocaleDateString("en-US", {
+          year: "numeric", month: "long", day: "numeric",
+        }) : "Unknown";
+
+        accountInfo.innerHTML = `
+          <div class="settings-grid">
+            <div>
+              <p class="form-label">Email</p>
+              <p style="font-size:0.9rem;">${escapeHTML(user.email || "No email")}</p>
+            </div>
+            <div>
+              <p class="form-label">User ID</p>
+              <p style="font-size:0.8rem;color:var(--text-muted);word-break:break-all;">${user.id}</p>
+            </div>
+            <div>
+              <p class="form-label">Member Since</p>
+              <p style="font-size:0.9rem;">${created}</p>
+            </div>
+            <div>
+              <p class="form-label">Last Sign In</p>
+              <p style="font-size:0.9rem;">${user.last_sign_in_at ? new Date(user.last_sign_in_at).toLocaleString() : "N/A"}</p>
+            </div>
+          </div>
+        `;
+      }
+
+      // Logout
+      document.getElementById("settings-logout-btn").addEventListener("click", async () => {
+        await KageAuth.signOut();
+        window.location.href = "/index.html";
+      });
+
+      // Delete all images
+      document.getElementById("settings-delete-all-btn").addEventListener("click", async () => {
+        if (!confirm("⚠️ This will permanently delete ALL your images and data from Kage. This cannot be undone. Are you sure?")) return;
+        if (!confirm("Final confirmation: Delete everything?")) return;
+
+        const client = KageAuth.getSupabaseClient();
+        if (!client) {
+          showToast("Not authenticated.", "error");
+          return;
+        }
+
+        // Get all image records
+        const { data: images, error: fetchError } = await client
+          .from("images")
+          .select("id, original_url, translated_url")
+          .eq("user_id", user.id);
+
+        if (fetchError) {
+          showToast(`Failed to fetch images: ${fetchError.message}`, "error");
+          return;
+        }
+
+        // Delete storage files
+        if (images && images.length > 0) {
+          const originalsPaths = [];
+          const translatedPaths = [];
+
+          for (const img of images) {
+            const origPath = extractPath(img.original_url, "originals");
+            const transPath = extractPath(img.translated_url, "translated");
+            if (origPath) originalsPaths.push(origPath);
+            if (transPath) translatedPaths.push(transPath);
+          }
+
+          if (originalsPaths.length > 0) {
+            await client.storage.from("originals").remove(originalsPaths);
+          }
+          if (translatedPaths.length > 0) {
+            await client.storage.from("translated").remove(translatedPaths);
+          }
+        }
+
+        // Delete all DB records
+        const { error: deleteError } = await client
+          .from("images")
+          .delete()
+          .eq("user_id", user.id);
+
+        if (deleteError) {
+          showToast(`Failed to delete records: ${deleteError.message}`, "error");
+        } else {
+          showToast("All images deleted.", "success");
+        }
+      });
+    })();
+
+    function showSettingsSaved() {
+      const msg = document.getElementById("settings-saved-msg");
+      msg.classList.remove("hidden");
+      setTimeout(() => msg.classList.add("hidden"), 2000);
+    }
+
+    function extractPath(url, bucket) {
+      if (!url) return null;
+      try {
+        const urlObj = new URL(url);
+        const parts = urlObj.pathname.split("/");
+        const idx = parts.indexOf(bucket);
+        if (idx >= 0) return parts.slice(idx + 1).join("/");
+      } catch (_) {}
+      return null;
+    }
+
+    function showToast(message, type) {
+      const container = document.getElementById("toast-container");
+      if (!container) return;
+      const toast = document.createElement("div");
+      toast.className = `toast ${type || ""}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = "0";
+        toast.style.transition = "opacity 0.3s";
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+
+    function escapeHTML(str) {
+      const div = document.createElement("div");
+      div.textContent = str || "";
+      return div.innerHTML;
+    }
+  </script>
+</body>
+</html>

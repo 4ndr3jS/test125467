@@ -1,0 +1,9 @@
+{
+  "name": "kage",
+  "version": "1.0.0",
+  "description": "Kage — AI-powered manga & image translation tool",
+  "private": true,
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}

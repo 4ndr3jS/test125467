@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Upload — Kage</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header class="navbar" id="navbar"></header>
+
+  <main class="container">
+    <h1 class="mt-4" style="margin-bottom:0.3rem;">Upload Images</h1>
+    <p class="text-muted mb-3">Select manga pages or any images containing text to translate.</p>
+
+    <!-- Drop zone -->
+    <div class="upload-area">
+      <div class="drop-zone" id="upload-drop-zone">
+        <span class="drop-zone-icon">📤</span>
+        <p>Drag &amp; drop images here, or <span class="highlight">click to browse</span></p>
+        <p style="font-size:0.78rem;color:var(--text-muted);margin-top:0.3rem;">
+          Supports JPG, PNG, WebP · Single or bulk upload · Folder drop supported
+        </p>
+        <input type="file" id="upload-file-input" accept="image/*" multiple webkitdirectory="" />
+      </div>
+    </div>
+
+    <!-- Preview grid -->
+    <div class="upload-preview-grid" id="upload-preview-grid"></div>
+
+    <!-- Options -->
+    <div class="card mt-3" id="upload-options" style="display:none;">
+      <div class="card-header">
+        <span class="card-title">⚙️ Processing Options</span>
+      </div>
+      <div class="settings-grid">
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label" for="upload-source-lang">Source Language</label>
+          <select class="form-input" id="upload-source-lang">
+            <option value="ja" selected>Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese</option>
+            <option value="en">English</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="es">Spanish</option>
+            <option value="auto">Auto Detect</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label" for="upload-target-lang">Target Language</label>
+          <select class="form-input" id="upload-target-lang">
+            <option value="en" selected>English</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="es">Spanish</option>
+            <option value="pt">Portuguese</option>
+            <option value="ru">Russian</option>
+            <option value="ar">Arabic</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label" for="upload-font-style">Font Style</label>
+          <select class="form-input" id="upload-font-style">
+            <option value="anime">Anime / Comic</option>
+            <option value="manga">Manga Bold</option>
+            <option value="mincho">Mincho Serif</option>
+            <option value="gothic">Gothic Sans</option>
+            <option value="hand">Handwritten</option>
+            <option value="pixel">Pixel / Mono</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="upload-actions" id="upload-actions" style="display:none;">
+      <button class="btn btn-primary btn-lg" id="upload-process-btn">
+        ⚡ Start Translation
+      </button>
+      <button class="btn btn-ghost" id="upload-clear-btn">
+        Clear Selection
+      </button>
+      <span class="text-muted" style="align-self:center;font-size:0.85rem;" id="upload-file-count"></span>
+    </div>
+
+    <!-- Pipeline progress -->
+    <div id="upload-pipeline" class="pipeline-container hidden"></div>
+
+    <!-- Result -->
+    <div id="upload-result" class="result-container hidden"></div>
+  </main>
+
+  <footer class="footer">
+    <p>Kage <span style="color:var(--red-primary);">影</span> — AI Manga Translator</p>
+  </footer>
+
+  <div class="toast-container" id="toast-container"></div>
+
+  <script>
+    window.ENV = {
+      SUPABASE_URL: "https://uhmeslocosmhnsvgecuh.supabase.co",
+      SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVobWVzbG9jb3NtaG5zdmdlY3VoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNTY0NDUsImV4cCI6MjA5NzczMjQ0NX0.o3VlCyJknFBnDvP6vy6FB7-eEkKLcuXAb5hN-Gxj1XQ",
+    };
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <!-- Tesseract.js for client-side OCR -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="/js/auth.js"></script>
+  <script src="/js/upload.js"></script>
+  <script src="/js/ocr-client.js"></script>
+  <script src="/js/inpaint-client.js"></script>
+  <script src="/js/pipeline.js"></script>
+
+  <script>
+    (async function () {
+      // Require auth
+      const user = await KageAuth.requireAuth();
+      if (!user) return;
+
+      // Render navbar
+      await KageAuth.renderNavbar("navbar", "upload");
+
+      // Load saved preferences
+      const savedTarget = localStorage.getItem("kage_target_lang") || "en";
+      const savedFont = localStorage.getItem("kage_font_style") || "anime";
+
+      const targetLangSelect = document.getElementById("upload-target-lang");
+      const fontStyleSelect = document.getElementById("upload-font-style");
+      if (targetLangSelect) targetLangSelect.value = savedTarget;
+      if (fontStyleSelect) fontStyleSelect.value = savedFont;
+
+      // Init drop zone
+      KageUpload.initDropZone({
+        dropZoneId: "upload-drop-zone",
+        fileInputId: "upload-file-input",
+        previewContainerId: "upload-preview-grid",
+        multiple: true,
+        onFilesChanged: (files) => {
+          const options = document.getElementById("upload-options");
+          const actions = document.getElementById("upload-actions");
+          const count = document.getElementById("upload-file-count");
+
+          if (files.length > 0) {
+            options.style.display = "";
+            actions.style.display = "flex";
+            if (count) count.textContent = `${files.length} file(s) selected`;
+          } else {
+            options.style.display = "none";
+            actions.style.display = "none";
+          }
+        },
+      });
+
+      // Save preferences on change
+      targetLangSelect?.addEventListener("change", () => {
+        localStorage.setItem("kage_target_lang", targetLangSelect.value);
+      });
+      fontStyleSelect?.addEventListener("change", () => {
+        localStorage.setItem("kage_font_style", fontStyleSelect.value);
+      });
+
+      // Clear button
+      document.getElementById("upload-clear-btn")?.addEventListener("click", () => {
+        KageUpload.clearFiles("upload-preview-grid");
+        document.getElementById("upload-options").style.display = "none";
+        document.getElementById("upload-actions").style.display = "none";
+      });
+
+      // Process button
+      document.getElementById("upload-process-btn")?.addEventListener("click", async () => {
+        await processUploadedFiles();
+      });
+    })();
+
+    async function processUploadedFiles() {
+      const user = KageAuth.getUser();
+      if (!user) return;
+
+      const files = KageUpload.getFiles();
+      if (files.length === 0) {
+        showToast("Please select at least one image.", "error");
+        return;
+      }
+
+      const sourceLang = document.getElementById("upload-source-lang")?.value || "ja";
+      const targetLang = document.getElementById("upload-target-lang")?.value || "en";
+      const fontStyle = document.getElementById("upload-font-style")?.value || "anime";
+
+      // Hide upload UI, show pipeline
+      document.getElementById("upload-actions").style.display = "none";
+      const pipelineEl = document.getElementById("upload-pipeline");
+      const resultEl = document.getElementById("upload-result");
+      pipelineEl.classList.remove("hidden");
+      resultEl.classList.add("hidden");
+
+      pipelineEl.innerHTML = buildPipelineUI();
+
+      const steps = {
+        ocr: document.getElementById("pipe-ocr"),
+        translate: document.getElementById("pipe-translate"),
+        inpaint: document.getElementById("pipe-inpaint"),
+        render: document.getElementById("pipe-render"),
+        finalize: document.getElementById("pipe-finalize"),
+      };
+
+      const statusEls = {};
+      for (const key of Object.keys(steps)) {
+        statusEls[key] = steps[key]?.querySelector(".pipeline-step-status");
+      }
+
+      // Upload
+      updateStep(steps.ocr, "active");
+      if (statusEls.ocr) statusEls.ocr.textContent = "Uploading to storage...";
+
+      const uploadResults = await KageUpload.uploadFiles(files, user.id, "originals");
+      const failedUploads = uploadResults.filter((r) => r.error);
+      if (failedUploads.length > 0) {
+        updateStep(steps.ocr, "error");
+        if (statusEls.ocr) statusEls.ocr.textContent = `Upload failed: ${failedUploads[0].error}`;
+        return;
+      }
+
+      // Create DB records
+      const records = await KageUpload.createImageRecords(user.id, uploadResults, sourceLang, targetLang);
+      if (records.length === 0) {
+        updateStep(steps.ocr, "error");
+        if (statusEls.ocr) statusEls.ocr.textContent = "Failed to save image records";
+        return;
+      }
+
+      updateStep(steps.ocr, "completed");
+      if (statusEls.ocr) statusEls.ocr.textContent = `${records.length} image(s) uploaded`;
+
+      // Process each image through pipeline
+      const results = [];
+      for (let i = 0; i < records.length; i++) {
+        const record = records[i];
+        const progressBar = document.getElementById("upload-progress-bar");
+
+        if (progressBar) {
+          progressBar.style.width = `${(i / records.length) * 100}%`;
+        }
+
+        const result = await KagePipeline.processImage(record, {
+          sourceLang,
+          targetLang,
+          fontStyle,
+          onProgress: (step, status, detail) => {
+            const stepEl = steps[step];
+            if (!stepEl) return;
+
+            if (status === "start") {
+              updateStep(stepEl, "active");
+              if (statusEls[step]) statusEls[step].textContent = detail;
+            } else if (status === "done") {
+              updateStep(stepEl, "completed");
+              if (statusEls[step]) statusEls[step].textContent = detail;
+            } else if (status === "error") {
+              updateStep(stepEl, "error");
+              if (statusEls[step]) statusEls[step].textContent = detail;
+            }
+          },
+        });
+
+        results.push({ record, ...result });
+      }
+
+      if (progressBar) progressBar.style.width = "100%";
+
+      // Show results
+      pipelineEl.classList.add("hidden");
+      resultEl.classList.remove("hidden");
+
+      const completed = results.filter((r) => r.success);
+      const failed = results.filter((r) => !r.success);
+
+      if (completed.length > 0) {
+        let html = `
+          <div class="text-center">
+            <h2>✨ ${completed.length} of ${results.length} Done</h2>
+            <p class="text-muted mb-3">
+              ${completed.length} image(s) translated successfully.
+              ${failed.length > 0 ? `${failed.length} failed.` : ""}
+            </p>
+            <div class="dashboard-grid" style="max-width:600px;margin:0 auto 1.5rem;">
+        `;
+
+        for (const r of completed) {
+          html += `
+            <div class="image-card">
+              <img class="image-card-img" src="${r.translatedUrl || r.record.original_url}" alt="Result" loading="lazy" />
+              <div class="image-card-body">
+                <div class="image-card-name">${escapeHTML(r.record.original_name || "Image")}</div>
+                <span class="status-badge completed">Completed</span>
+              </div>
+              <div class="image-card-actions">
+                ${r.translatedUrl ? `<a href="${r.translatedUrl}" class="btn btn-primary btn-sm" download>⬇ Download</a>` : ""}
+              </div>
+            </div>
+          `;
+        }
+
+        html += `
+            </div>
+            <div class="result-actions">
+              <a href="/dashboard.html" class="btn btn-secondary">View All in Dashboard</a>
+              <button class="btn btn-primary" onclick="window.location.reload()">Translate More</button>
+            </div>
+          </div>
+        `;
+
+        resultEl.innerHTML = html;
+      } else {
+        resultEl.innerHTML = `
+          <div class="text-center">
+            <h2>❌ Translation Failed</h2>
+            <p class="text-muted mb-2">All ${results.length} image(s) failed to process.</p>
+            ${failed[0] ? `<p class="text-muted">Error: ${escapeHTML(failed[0].error || "Unknown")}</p>` : ""}
+            <div class="result-actions">
+              <button class="btn btn-primary" onclick="window.location.reload()">Try Again</button>
+              <a href="/dashboard.html" class="btn btn-secondary">Dashboard</a>
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    function buildPipelineUI() {
+      return `
+        <h3 class="text-center mb-2">Processing Your Images...</h3>
+        <div class="pipeline-steps">
+          <div class="pipeline-step" id="pipe-ocr">
+            <div class="pipeline-step-icon">🔍</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">OCR — Detect Text</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+          <div class="pipeline-step" id="pipe-translate">
+            <div class="pipeline-step-icon">🌐</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">Translate</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+          <div class="pipeline-step" id="pipe-inpaint">
+            <div class="pipeline-step-icon">🧹</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">Clean Original Text</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+          <div class="pipeline-step" id="pipe-render">
+            <div class="pipeline-step-icon">🎨</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">Render Translation</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+          <div class="pipeline-step" id="pipe-finalize">
+            <div class="pipeline-step-icon">✅</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">Save &amp; Finalize</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+        </div>
+        <div class="progress-bar-track mt-3">
+          <div class="progress-bar-fill" id="upload-progress-bar" style="width:0%;"></div>
+        </div>
+      `;
+    }
+
+    function updateStep(el, state) {
+      if (!el) return;
+      el.className = `pipeline-step ${state}`;
+    }
+
+    function showToast(message, type) {
+      const container = document.getElementById("toast-container");
+      if (!container) return;
+      const toast = document.createElement("div");
+      toast.className = `toast ${type || ""}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = "0";
+        toast.style.transition = "opacity 0.3s";
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+
+    function escapeHTML(str) {
+      const div = document.createElement("div");
+      div.textContent = str || "";
+      return div.innerHTML;
+    }
+  </script>
+</body>
+</html>

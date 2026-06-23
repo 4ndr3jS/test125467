@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Kage — AI-powered manga & image translation. Upload, OCR, translate, and download." />
+  <title>Kage — AI Manga Translator</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Serif+JP:wght@400;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <!-- Navbar -->
+  <header class="navbar" id="navbar"></header>
+
+  <!-- Hero -->
+  <section class="hero">
+    <h1>Translate Manga Instantly</h1>
+    <p class="subtitle">
+      Upload manga, manhwa, or any image containing text. Kage OCRs, translates,
+      cleans, and re-renders — all automatically.
+    </p>
+    <div class="cta-group" id="hero-cta">
+      <!-- Filled by JS based on auth state -->
+    </div>
+  </section>
+
+  <div class="container">
+    <!-- Demo Drop Zone -->
+    <div class="drop-zone" id="landing-drop-zone">
+      <span class="drop-zone-icon">📤</span>
+      <p>Drag &amp; drop an image here, or <span class="highlight">click to browse</span></p>
+      <p style="font-size:0.78rem;color:var(--text-muted);margin-top:0.3rem;">Supports JPG, PNG, WebP — single or multiple</p>
+      <input type="file" id="landing-file-input" accept="image/*" multiple />
+    </div>
+
+    <!-- Quick upload previews (shown when files are selected) -->
+    <div class="upload-preview-grid" id="landing-preview-grid"></div>
+
+    <!-- Sign-in prompt for non-logged-in users trying to upload -->
+    <div id="landing-auth-prompt" class="hidden mt-2 text-center">
+      <div class="card" style="max-width:420px;margin:0 auto;">
+        <p class="mb-2">Sign in to start translating</p>
+        <div class="cta-group">
+          <a href="/index.html" class="btn btn-primary" id="landing-login-btn">Sign In / Sign Up</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Start processing button (shown for logged-in users with files selected) -->
+    <div id="landing-process-area" class="hidden upload-actions" style="justify-content:center;margin-top:1rem;">
+      <button class="btn btn-primary btn-lg" id="landing-process-btn">
+        ⚡ Translate Now
+      </button>
+    </div>
+
+    <!-- Pipeline progress (shown during processing) -->
+    <div id="landing-pipeline" class="pipeline-container hidden"></div>
+
+    <!-- Result -->
+    <div id="landing-result" class="result-container hidden"></div>
+  </div>
+
+  <!-- Features -->
+  <section class="container">
+    <div class="features">
+      <div class="feature-card">
+        <span class="feature-icon">🔍</span>
+        <h3>Manga OCR</h3>
+        <p>Purpose-built for Japanese manga and comics. Detects text in speech bubbles, sound effects, and more.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🌐</span>
+        <h3>Instant Translation</h3>
+        <p>Translate to English or any target language using the MyMemory translation engine — fast and free.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🧹</span>
+        <h3>Smart Cleanup</h3>
+        <p>AI-powered inpainting removes original text from bubbles while preserving the artwork underneath.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🎨</span>
+        <h3>Beautiful Rendering</h3>
+        <p>Translated text is re-rendered inside cleaned bubbles with your choice of font style.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <p>Kage <span style="color:var(--red-primary);">影</span> — AI Manga Translator · Built with Hugging Face + Supabase + Vercel</p>
+  </footer>
+
+  <!-- Toast container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- ENV config — replace these values before deploy -->
+  <script>
+    window.ENV = {
+      SUPABASE_URL: "https://uhmeslocosmhnsvgecuh.supabase.co",
+      SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVobWVzbG9jb3NtaG5zdmdlY3VoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNTY0NDUsImV4cCI6MjA5NzczMjQ0NX0.o3VlCyJknFBnDvP6vy6FB7-eEkKLcuXAb5hN-Gxj1XQ",
+    };
+  </script>
+
+  <!-- Supabase SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+
+  <!-- Tesseract.js for client-side OCR -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <!-- Kage modules -->
+  <script src="/js/auth.js"></script>
+  <script src="/js/upload.js"></script>
+  <script src="/js/ocr-client.js"></script>
+  <script src="/js/inpaint-client.js"></script>
+  <script src="/js/pipeline.js"></script>
+
+  <script>
+    (async function () {
+      // Render navbar
+      await KageAuth.renderNavbar("navbar", "index");
+
+      const user = KageAuth.getUser();
+      const heroCta = document.getElementById("hero-cta");
+
+      if (user) {
+        heroCta.innerHTML = `
+          <a href="/upload.html" class="btn btn-primary btn-lg">📤 Upload &amp; Translate</a>
+          <a href="/dashboard.html" class="btn btn-secondary btn-lg">📊 My Dashboard</a>
+        `;
+      } else {
+        heroCta.innerHTML = `
+          <button class="btn btn-primary btn-lg" id="hero-auth-btn">🔐 Sign In / Sign Up</button>
+        `;
+        document.getElementById("hero-auth-btn").addEventListener("click", () => {
+          showAuthModal("signin");
+        });
+      }
+
+      // Init drop zone
+      KageUpload.initDropZone({
+        dropZoneId: "landing-drop-zone",
+        fileInputId: "landing-file-input",
+        previewContainerId: "landing-preview-grid",
+        multiple: true,
+        onFilesChanged: (files) => {
+          const authPrompt = document.getElementById("landing-auth-prompt");
+          const processArea = document.getElementById("landing-process-area");
+
+          if (!KageAuth.getUser()) {
+            authPrompt.classList.remove("hidden");
+            processArea.classList.add("hidden");
+          } else {
+            authPrompt.classList.add("hidden");
+            processArea.classList.remove("hidden");
+          }
+        },
+      });
+
+      // Process button
+      document.getElementById("landing-process-btn").addEventListener("click", async () => {
+        await processLandingFiles();
+      });
+
+      // Auth modal buttons
+      document.getElementById("landing-login-btn").addEventListener("click", (e) => {
+        e.preventDefault();
+        showAuthModal("signin");
+      });
+    })();
+
+    // --- Auth Modal ---
+    function showAuthModal(mode) {
+      const existing = document.querySelector(".modal-overlay");
+      if (existing) existing.remove();
+
+      const isSignUp = mode === "signup";
+      const title = isSignUp ? "Create Account" : "Welcome Back";
+      const subtitle = isSignUp
+        ? "Sign up to start translating manga"
+        : "Sign in to your account";
+      const switchMode = isSignUp ? "signin" : "signup";
+      const switchText = isSignUp
+        ? "Already have an account? <a href='#' class='switch-mode'>Sign in</a>"
+        : "Don't have an account? <a href='#' class='switch-mode'>Sign up</a>";
+
+      const overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      overlay.innerHTML = `
+        <div class="auth-card">
+          <h2>${title}</h2>
+          <p class="auth-subtitle">${subtitle}</p>
+          <div class="auth-error" id="modal-auth-error"></div>
+          <form id="modal-auth-form">
+            <div class="form-group">
+              <label class="form-label" for="modal-email">Email</label>
+              <input class="form-input" type="email" id="modal-email" placeholder="you@example.com" required autocomplete="email" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="modal-password">Password</label>
+              <input class="form-input" type="password" id="modal-password" placeholder="Min. 6 characters" required minlength="6" autocomplete="${isSignUp ? 'new-password' : 'current-password'}" />
+            </div>
+            <button type="submit" class="btn btn-primary" style="width:100%;">
+              ${isSignUp ? "Create Account" : "Sign In"}
+            </button>
+          </form>
+          <p class="auth-switch">${switchText}</p>
+        </div>
+      `;
+
+      document.body.appendChild(overlay);
+
+      // Close on overlay click
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) overlay.remove();
+      });
+
+      // Switch mode
+      overlay.querySelector(".switch-mode").addEventListener("click", (e) => {
+        e.preventDefault();
+        overlay.remove();
+        showAuthModal(switchMode);
+      });
+
+      // Submit
+      overlay.querySelector("#modal-auth-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const email = document.getElementById("modal-email").value.trim();
+        const password = document.getElementById("modal-password").value;
+        const errorEl = document.getElementById("modal-auth-error");
+
+        errorEl.classList.remove("visible");
+        errorEl.textContent = "";
+
+        if (password.length < 6) {
+          errorEl.textContent = "Password must be at least 6 characters.";
+          errorEl.classList.add("visible");
+          return;
+        }
+
+        let result;
+        if (isSignUp) {
+          result = await KageAuth.signUp(email, password);
+        } else {
+          result = await KageAuth.signIn(email, password);
+        }
+
+        if (result.error) {
+          errorEl.textContent = result.error;
+          errorEl.classList.add("visible");
+          return;
+        }
+
+        // Success — reload
+        overlay.remove();
+        showToast("Signed in successfully!", "success");
+        setTimeout(() => window.location.reload(), 500);
+      });
+    }
+
+    // --- Process files from landing page ---
+    async function processLandingFiles() {
+      const user = KageAuth.getUser();
+      if (!user) return;
+
+      const files = KageUpload.getFiles();
+      if (files.length === 0) {
+        showToast("Please select at least one image.", "error");
+        return;
+      }
+
+      const pipelineEl = document.getElementById("landing-pipeline");
+      const resultEl = document.getElementById("landing-result");
+      const processArea = document.getElementById("landing-process-area");
+
+      processArea.classList.add("hidden");
+      pipelineEl.classList.remove("hidden");
+      resultEl.classList.add("hidden");
+
+      // Show pipeline UI
+      pipelineEl.innerHTML = buildPipelineUI();
+
+      const steps = {
+        ocr: document.getElementById("pipe-ocr"),
+        translate: document.getElementById("pipe-translate"),
+        inpaint: document.getElementById("pipe-inpaint"),
+        render: document.getElementById("pipe-render"),
+        finalize: document.getElementById("pipe-finalize"),
+      };
+
+      const statusEls = {};
+      for (const key of Object.keys(steps)) {
+        statusEls[key] = steps[key]?.querySelector(".pipeline-step-status");
+      }
+
+      // Upload files first
+      updatePipelineStep(steps.ocr, "active");
+      if (statusEls.ocr) statusEls.ocr.textContent = "Uploading images...";
+
+      const sourceLang = localStorage.getItem("kage_source_lang") || "ja";
+      const targetLang = localStorage.getItem("kage_target_lang") || "en";
+      const fontStyle = localStorage.getItem("kage_font_style") || "anime";
+
+      const uploadResults = await KageUpload.uploadFiles(files, user.id, "originals");
+      const failed = uploadResults.filter((r) => r.error);
+      if (failed.length > 0) {
+        updatePipelineStep(steps.ocr, "error");
+        if (statusEls.ocr) statusEls.ocr.textContent = `Upload failed: ${failed[0].error}`;
+        return;
+      }
+
+      const records = await KageUpload.createImageRecords(user.id, uploadResults, sourceLang, targetLang);
+
+      if (records.length === 0) {
+        updatePipelineStep(steps.ocr, "error");
+        if (statusEls.ocr) statusEls.ocr.textContent = "Failed to create image records";
+        return;
+      }
+
+      updatePipelineStep(steps.ocr, "completed");
+      if (statusEls.ocr) statusEls.ocr.textContent = `Uploaded ${records.length} image(s)`;
+
+      // Process each image
+      const results = [];
+      for (const record of records) {
+        updatePipelineStep(steps.translate, "active");
+
+        const result = await KagePipeline.processImage(record, {
+          sourceLang,
+          targetLang,
+          fontStyle,
+          onProgress: (step, status, detail) => {
+            const stepMap = {
+              ocr: steps.ocr,
+              translate: steps.translate,
+              inpaint: steps.inpaint,
+              render: steps.render,
+              finalize: steps.finalize,
+            };
+
+            const el = stepMap[step];
+            if (!el) return;
+
+            if (status === "start") {
+              updatePipelineStep(el, "active");
+              if (statusEls[step]) statusEls[step].textContent = detail;
+            } else if (status === "done") {
+              updatePipelineStep(el, "completed");
+              if (statusEls[step]) statusEls[step].textContent = detail;
+            } else if (status === "error") {
+              updatePipelineStep(el, "error");
+              if (statusEls[step]) statusEls[step].textContent = detail;
+            }
+          },
+        });
+
+        results.push(result);
+      }
+
+      // Show result
+      pipelineEl.classList.add("hidden");
+      resultEl.classList.remove("hidden");
+
+      const completed = results.filter((r) => r.success);
+      if (completed.length > 0) {
+        const url = completed[0].translatedUrl;
+        resultEl.innerHTML = `
+          <div class="text-center">
+            <h2>✨ Translation Complete!</h2>
+            <p class="text-muted mb-3">${completed.length} of ${results.length} image(s) translated successfully.</p>
+            ${url ? `
+            <div class="result-comparison" style="max-width:700px;margin:0 auto;">
+              <div class="result-pane">
+                <div class="result-pane-header">Original</div>
+                <img src="${records[0]?.original_url || ''}" alt="Original" />
+              </div>
+              <div class="result-pane">
+                <div class="result-pane-header">Translated</div>
+                <img src="${url}" alt="Translated" />
+              </div>
+            </div>` : ""}
+            <div class="result-actions">
+              ${url ? `<a href="${url}" class="btn btn-primary" download>⬇ Download</a>` : ""}
+              <a href="/dashboard.html" class="btn btn-secondary">View Dashboard</a>
+              <button class="btn btn-ghost" onclick="window.location.reload()">Translate More</button>
+            </div>
+          </div>
+        `;
+      } else {
+        resultEl.innerHTML = `
+          <div class="text-center">
+            <h2>❌ Translation Failed</h2>
+            <p class="text-muted mb-2">Something went wrong during processing.</p>
+            <p class="text-muted">${results[0]?.error || "Unknown error"}</p>
+            <div class="result-actions">
+              <button class="btn btn-primary" onclick="window.location.reload()">Try Again</button>
+              <a href="/dashboard.html" class="btn btn-secondary">Dashboard</a>
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    // --- Pipeline UI Helpers ---
+    function buildPipelineUI() {
+      return `
+        <h3 class="text-center mb-2">Processing...</h3>
+        <div class="pipeline-steps">
+          <div class="pipeline-step" id="pipe-ocr">
+            <div class="pipeline-step-icon">🔍</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">OCR</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+          <div class="pipeline-step" id="pipe-translate">
+            <div class="pipeline-step-icon">🌐</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">Translate</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+          <div class="pipeline-step" id="pipe-inpaint">
+            <div class="pipeline-step-icon">🧹</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">Clean Bubbles</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+          <div class="pipeline-step" id="pipe-render">
+            <div class="pipeline-step-icon">🎨</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">Render Text</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+          <div class="pipeline-step" id="pipe-finalize">
+            <div class="pipeline-step-icon">✅</div>
+            <div class="pipeline-step-info">
+              <div class="pipeline-step-label">Finalize</div>
+              <div class="pipeline-step-status">Waiting...</div>
+            </div>
+          </div>
+        </div>
+        <div class="progress-bar-track mt-3">
+          <div class="progress-bar-fill" id="landing-progress-bar" style="width:0%;"></div>
+        </div>
+      `;
+    }
+
+    function updatePipelineStep(el, state) {
+      if (!el) return;
+      el.className = `pipeline-step ${state}`;
+    }
+
+    // --- Toast ---
+    function showToast(message, type) {
+      const container = document.getElementById("toast-container");
+      if (!container) return;
+      const toast = document.createElement("div");
+      toast.className = `toast ${type || ""}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = "0";
+        toast.style.transition = "opacity 0.3s";
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+  </script>
+</body>
+</html>

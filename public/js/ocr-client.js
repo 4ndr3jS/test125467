@@ -1,258 +1,259 @@
 /**
  * Kage Client-Side OCR Module (Tesseract.js)
- * Includes image pre-processing for better manga text detection.
  * Exposes `KageOCR` globally.
+ *
+ * Changes from original:
+ * 1. PSM changed from 11 ("sparse text") to 6 ("uniform block of text").
+ * PSM 11 grabs noise, panel borders, and SFX all over the page — wrong for manga.
+ * PSM 6 reads clean blocks and respects reading order within each bubble region.
+ * 2. Preprocessing is now CONDITIONAL. For clean digital manga/webtoons the source
+ * pixels are already anti-aliased; running adaptive thresholding on them destroys
+ * the subtle greyscale gradients that Tesseract relies on to find character edges.
+ * We detect low-contrast / scanned images automatically and only binarise those.
+ * 3. When preprocessing IS applied, the adaptive window shrinks to 11px (was 15) and
+ * the C bias rises to 6 (was 4) — this preserves thin strokes better.
  */
 
 (function () {
-  "use strict";
+ "use strict";
 
-  let currentWorker = null;
-  let currentJobId = 0;
+ let currentWorker = null;
+ let currentJobId = 0;
 
-  /**
-   * Run OCR on an image with pre-processing for manga text.
-   */
-  async function recognize(imageUrl, sourceLang = "ja", onProgress) {
-    const jobId = ++currentJobId;
+ async function recognize(imageUrl, sourceLang = "ja", onProgress) {
+   const jobId = ++currentJobId;
 
-    if (currentWorker) {
-      try { await currentWorker.terminate(); } catch (_) {}
-      currentWorker = null;
-    }
+   if (currentWorker) {
+     try { await currentWorker.terminate(); } catch (_) {}
+     currentWorker = null;
+   }
 
-    if (!window.Tesseract) {
-      throw new Error("Tesseract.js not loaded. Add the CDN script to your page.");
-    }
+   if (!window.Tesseract) {
+     throw new Error("Tesseract.js not loaded. Add the CDN script to your page.");
+   }
 
-    if (onProgress) onProgress({ progress: 0, status: "Pre-processing image..." });
+   if (onProgress) onProgress({ progress: 0, status: "Analysing image..." });
 
-    // Step 1: Pre-process the image for better OCR
-    const processedDataUrl = await preprocessImage(imageUrl, jobId);
-    if (!processedDataUrl) throw new Error("Image pre-processing failed");
+   const processedDataUrl = await preprocessImage(imageUrl, jobId);
+   if (!processedDataUrl) throw new Error("Image pre-processing failed");
 
-    if (onProgress) onProgress({ progress: 0.05, status: "Loading OCR engine..." });
+   if (onProgress) onProgress({ progress: 0.05, status: "Loading OCR engine..." });
 
-    // Language mapping
-    const langMap = {
-      ja: "jpn",
-      ko: "kor",
-      zh: "chi_sim",
-      "zh-TW": "chi_tra",
-      en: "eng",
-      fr: "fra",
-      de: "deu",
-      es: "spa",
-      pt: "por",
-      ru: "rus",
-      auto: "jpn+eng",
-    };
+   const langMap = {
+     ja: "jpn", ko: "kor", zh: "chi_sim", "zh-TW":"chi_tra",
+     en: "eng", fr: "fra", de: "deu", es: "spa", pt: "por", ru: "rus", auto: "jpn+eng",
+   };
+   const tesseractLang = langMap[sourceLang] || "jpn";
 
-    const tesseractLang = langMap[sourceLang] || "jpn";
+   try {
+     const worker = await window.Tesseract.createWorker(tesseractLang, 1, {
+       logger: (m) => {
+         if (jobId !== currentJobId) return;
+         if (m.status === "recognizing text" && onProgress) {
+           onProgress({
+             progress: Math.min(0.9, 0.05 + m.progress * 0.85),
+             status: `OCR… ${Math.round(m.progress * 100)}%`,
+           });
+         }
+       },
+     });
 
-    try {
-      const worker = await window.Tesseract.createWorker(tesseractLang, 1, {
-        logger: (m) => {
-          if (jobId !== currentJobId) return;
-          if (m.status === "recognizing text" && onProgress) {
-            onProgress({
-              progress: Math.min(0.9, 0.05 + m.progress * 0.85),
-              status: `OCR... ${Math.round(m.progress * 100)}%`,
-            });
-          }
-        },
-      });
+     currentWorker = worker;
+     if (jobId !== currentJobId) {
+       await worker.terminate();
+       currentWorker = null;
+       throw new Error("Cancelled");
+     }
 
-      currentWorker = worker;
-      if (jobId !== currentJobId) {
-        await worker.terminate();
-        currentWorker = null;
-        throw new Error("Cancelled");
-      }
+     await worker.setParameters({
+       tessedit_pageseg_mode: "6",
+       tessedit_char_whitelist: "",
+       preserve_interword_spaces: "1",
+     });
 
-      // Set Tesseract parameters optimized for manga
-      await worker.setParameters({
-        tessedit_pageseg_mode: "11",    // Sparse text — find as much as possible
-        tessedit_char_whitelist: "",
-        preserve_interword_spaces: "1",
-      });
+     if (onProgress) onProgress({ progress: 0.08, status: "Running OCR..." });
 
-      if (onProgress) onProgress({ progress: 0.08, status: "Running OCR..." });
+     const { data } = await worker.recognize(processedDataUrl);
 
-      const { data } = await worker.recognize(processedDataUrl);
+     if (jobId !== currentJobId) {
+       await worker.terminate();
+       currentWorker = null;
+       throw new Error("Cancelled");
+     }
 
-      if (jobId !== currentJobId) {
-        await worker.terminate();
-        currentWorker = null;
-        throw new Error("Cancelled");
-      }
+     let fullText = "";
+     const boxes = [];
 
-      // Normalize output
-      let fullText = "";
-      const boxes = [];
+     if (data.lines && data.lines.length > 0) {
+       for (const line of data.lines) {
+         const text = line.text.trim();
+         if (text) {
+           fullText += text + "\n";
+           boxes.push({
+             x: line.bbox.x0,
+             y: line.bbox.y0,
+             w: line.bbox.x1 - line.bbox.x0,
+             h: line.bbox.y1 - line.bbox.y0,
+             text,
+           });
+         }
+       }
+     } else if (data.words && data.words.length > 0) {
+       for (const word of data.words) {
+         const text = word.text.trim();
+         if (text) {
+           fullText += text + " ";
+           boxes.push({
+             x: word.bbox.x0,
+             y: word.bbox.y0,
+             w: word.bbox.x1 - word.bbox.x0,
+             h: word.bbox.y1 - word.bbox.y0,
+             text,
+           });
+         }
+       }
+       fullText = fullText.trim();
+     } else if (data.text) {
+       fullText = data.text.trim();
+     }
 
-      if (data.lines && data.lines.length > 0) {
-        for (const line of data.lines) {
-          const text = line.text.trim();
-          if (text) {
-            fullText += text + "\n";
-            boxes.push({
-              x: line.bbox.x0,
-              y: line.bbox.y0,
-              w: line.bbox.x1 - line.bbox.x0,
-              h: line.bbox.y1 - line.bbox.y0,
-              text,
-            });
-          }
-        }
-      } else if (data.words && data.words.length > 0) {
-        for (const word of data.words) {
-          const text = word.text.trim();
-          if (text) {
-            fullText += text;
-            boxes.push({
-              x: word.bbox.x0,
-              y: word.bbox.y0,
-              w: word.bbox.x1 - word.bbox.x0,
-              h: word.bbox.y1 - word.bbox.y0,
-              text,
-            });
-          }
-        }
-        fullText = fullText.trim();
-      } else if (data.text) {
-        fullText = data.text.trim();
-      }
+     await worker.terminate();
+     currentWorker = null;
 
-      await worker.terminate();
-      currentWorker = null;
+     if (onProgress) onProgress({ progress: 1, status: "OCR complete" });
+     return { text: fullText.trim(), boxes, confidence: data.confidence };
+   } catch (err) {
+     if (currentWorker) {
+       try { await currentWorker.terminate(); } catch (_) {}
+       currentWorker = null;
+     }
+     throw err;
+   }
+ }
 
-      if (onProgress) onProgress({ progress: 1, status: "OCR complete" });
+ function needsPreprocessing(gray, width, height) {
+   const GRID = 16;
+   const stepX = Math.max(1, Math.floor(width / GRID));
+   const stepY = Math.max(1, Math.floor(height / GRID));
 
-      return { text: fullText.trim(), boxes, confidence: data.confidence };
-    } catch (err) {
-      if (currentWorker) {
-        try { await currentWorker.terminate(); } catch (_) {}
-        currentWorker = null;
-      }
-      throw err;
-    }
-  }
+   let sum = 0, count = 0;
+   for (let y = 0; y < height; y += stepY) {
+     for (let x = 0; x < width; x += stepX) {
+       sum += gray[y * width + x];
+       count++;
+     }
+   }
+   const mean = sum / count;
 
-  /**
-   * Pre-process image for better OCR:
-   * 1. Convert to grayscale
-   * 2. Increase contrast using CLAHE-like approach
-   * 3. Apply adaptive thresholding for binarization
-   * 4. Sharpen edges
-   * Returns a data URL of the processed image.
-   */
-  function preprocessImage(imageUrl, jobId) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
+   let variance = 0;
+   for (let y = 0; y < height; y += stepY) {
+     for (let x = 0; x < width; x += stepX) {
+       const d = gray[y * width + x] - mean;
+       variance += d * d;
+     }
+   }
+   variance /= count;
+   const stddev = Math.sqrt(variance);
 
-      img.onload = () => {
-        if (jobId !== currentJobId) return resolve(null);
+   return stddev < 80;
+ }
 
-        const canvas = document.createElement("canvas");
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        const ctx = canvas.getContext("2d");
+ function preprocessImage(imageUrl, jobId) {
+   return new Promise((resolve) => {
+     const img = new Image();
+     img.crossOrigin = "anonymous";
 
-        // Draw original
-        ctx.drawImage(img, 0, 0);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const pixels = imageData.data;
-        const len = pixels.length;
+     img.onload = () => {
+       if (jobId !== currentJobId) return resolve(null);
 
-        // --- Step 1: Convert to grayscale ---
-        const gray = new Uint8Array(canvas.width * canvas.height);
-        for (let i = 0; i < len; i += 4) {
-          // Weighted grayscale (luminance)
-          gray[i / 4] = Math.round(
-            pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114
-          );
-        }
+       const canvas = document.createElement("canvas");
+       canvas.width = img.naturalWidth;
+       canvas.height = img.naturalHeight;
+       const ctx = canvas.getContext("2d");
+       ctx.drawImage(img, 0, 0);
 
-        // --- Step 2: Contrast enhancement (stretch histogram) ---
-        let min = 255, max = 0;
-        for (let i = 0; i < gray.length; i++) {
-          if (gray[i] < min) min = gray[i];
-          if (gray[i] > max) max = gray[i];
-        }
-        const range = max - min || 1;
-        const contrastMap = new Uint8Array(256);
-        for (let i = 0; i < 256; i++) {
-          contrastMap[i] = Math.round(((i - min) / range) * 255);
-        }
+       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+       const pixels = imageData.data;
+       const len = pixels.length;
+       const w = canvas.width;
+       const h = canvas.height;
 
-        // --- Step 3: Adaptive thresholding ---
-        // Use adaptive thresholding — smaller window preserves small text
-        const windowSize = 15; // Smaller = more text preserved
-        const halfWindow = Math.floor(windowSize / 2);
-        const w = canvas.width;
-        const h = canvas.height;
+       const gray = new Uint8Array(w * h);
+       for (let i = 0; i < len; i += 4) {
+         gray[i >> 2] = Math.round(pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114);
+       }
 
-        // Compute integral image for fast local sum
-        const integral = new Uint32Array((w + 1) * (h + 1));
-        for (let y = 0; y < h; y++) {
-          let rowSum = 0;
-          for (let x = 0; x < w; x++) {
-            const val = contrastMap[gray[y * w + x]];
-            rowSum += val;
-            const above = integral[y * (w + 1) + (x + 1)];
-            integral[(y + 1) * (w + 1) + (x + 1)] = above + rowSum;
-          }
-        }
+       if (!needsPreprocessing(gray, w, h)) {
+         resolve(canvas.toDataURL("image/png"));
+         return;
+       }
 
-        const C = 4; // Lower = more text preserved (less aggressive removal)
+       let min = 255, max = 0;
+       for (let i = 0; i < gray.length; i++) {
+         if (gray[i] < min) min = gray[i];
+         if (gray[i] > max) max = gray[i];
+       }
+       const range = max - min || 1;
+       const cmap = new Uint8Array(256);
+       for (let i = 0; i < 256; i++) {
+         cmap[i] = Math.round(((i - min) / range) * 255);
+       }
 
-        for (let y = 0; y < h; y++) {
-          for (let x = 0; x < w; x++) {
-            const x1 = Math.max(0, x - halfWindow);
-            const y1 = Math.max(0, y - halfWindow);
-            const x2 = Math.min(w - 1, x + halfWindow);
-            const y2 = Math.min(h - 1, y + halfWindow);
+       const windowSize = 11;
+       const half = Math.floor(windowSize / 2);
+       const C = 6;
 
-            const area = (x2 - x1 + 1) * (y2 - y1 + 1);
-            const sum =
-              integral[(y2 + 1) * (w + 1) + (x2 + 1)] -
-              integral[(y2 + 1) * (w + 1) + x1] -
-              integral[y1 * (w + 1) + (x2 + 1)] +
-              integral[y1 * (w + 1) + x1];
+       const integral = new Uint32Array((w + 1) * (h + 1));
+       for (let y = 0; y < h; y++) {
+         let rowSum = 0;
+         for (let x = 0; x < w; x++) {
+           rowSum += cmap[gray[y * w + x]];
+           integral[(y + 1) * (w + 1) + (x + 1)] = integral[y * (w + 1) + (x + 1)] + rowSum;
+         }
+       }
 
-            const mean = sum / area;
-            const idx = y * w + x;
-            const pixelVal = contrastMap[gray[idx]];
+       for (let y = 0; y < h; y++) {
+         for (let x = 0; x < w; x++) {
+           const x1 = Math.max(0, x - half);
+           const y1 = Math.max(0, y - half);
+           const x2 = Math.min(w - 1, x + half);
+           const y2 = Math.min(h - 1, y + half);
 
-            // If pixel is darker than local mean, it's text (black)
-            const binary = pixelVal < (mean - C) ? 0 : 255;
+           const area = (x2 - x1 + 1) * (y2 - y1 + 1);
+           const sum =
+             integral[(y2 + 1) * (w + 1) + (x2 + 1)] -
+             integral[(y2 + 1) * (w + 1) + x1] -
+             integral[y1 * (w + 1) + (x2 + 1)] +
+             integral[y1 * (w + 1) + x1];
 
-            const i4 = idx * 4;
-            pixels[i4] = binary;
-            pixels[i4 + 1] = binary;
-            pixels[i4 + 2] = binary;
-            pixels[i4 + 3] = 255;
-          }
-        }
+           const localMean = sum / area;
+           const pixelVal = cmap[gray[y * w + x]];
+           const binary = pixelVal < (localMean - C) ? 0 : 255;
 
-        ctx.putImageData(imageData, 0, 0);
-        resolve(canvas.toDataURL("image/png"));
-      };
+           const i4 = (y * w + x) * 4;
+           pixels[i4] = binary;
+           pixels[i4 + 1] = binary;
+           pixels[i4 + 2] = binary;
+           pixels[i4 + 3] = 255;
+         }
+       }
 
-      img.onerror = () => resolve(null);
-      img.src = imageUrl;
-    });
-  }
+       ctx.putImageData(imageData, 0, 0);
+       resolve(canvas.toDataURL("image/png"));
+     };
 
-  async function cancel() {
-    currentJobId++;
-    if (currentWorker) {
-      try { await currentWorker.terminate(); } catch (_) {}
-      currentWorker = null;
-    }
-  }
+     img.onerror = () => resolve(null);
+     img.src = imageUrl;
+   });
+ }
 
-  window.KageOCR = { recognize, cancel };
+ async function cancel() {
+   currentJobId++;
+   if (currentWorker) {
+     try { await currentWorker.terminate(); } catch (_) {}
+     currentWorker = null;
+   }
+ }
+
+ window.KageOCR = { recognize, cancel };
 })();

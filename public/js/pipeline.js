@@ -1,333 +1,378 @@
 /**
- * Kage Processing Pipeline v3
- * OCR: HF Space manga-ocr + OCR.space + Tesseract.js (all three in parallel)
+ * Kage Processing Pipeline v4
+ * OCR: manga-ocr (text, Japanese) + OCR.space (text + boxes) + Tesseract.js (fallback)
  * Translation: MyMemory via /api/translate
  * Inpainting: Canvas (bubble interior sampling)
  * Rendering: Canvas text with font overlay
+ *
+ * Key changes from v3:
+ *
+ * 1. SINGLE SOURCE OF TRUTH FOR TEXT (Japanese).
+ * Previously: 3 engines ran in parallel and their outputs were "frankenstein'd"
+ * together — manga-ocr text was assigned to Tesseract boxes by Y position
+ * (assignLinesToBoxes), which broke whenever line counts differed even by one.
+ * Now: manga-ocr wins outright for Japanese text. Tesseract is only consulted
+ * when both server engines fail entirely.
+ *
+ * 2. OCR.space BOXES ARE USED DIRECTLY.
+ * No more piping OCR.space boxes through Tesseract re-labelling. If OCR.space
+ * returns boxes we use them. If not, we fall back to Tesseract boxes (with
+ * Tesseract text — no cross-engine text→box assignment at all).
+ *
+ * 3. groupWordsIntoLines THRESHOLDS FIXED.
+ * yDist threshold raised from 8px to 15px — accommodates manga's taller
+ * character cells and font size variation between bubbles.
+ * xGap threshold raised from 25px to 40px — avoids splitting a single line of
+ * Japanese into multiple boxes when character spacing is wider than expected.
+ * Added a minimum xGap of -15 (was -5) to handle slight right-edge overshoot.
+ *
+ * 4. assignLinesToBoxes IS REMOVED.
+ * It was the primary source of garbled output and had no reliable fallback.
  */
 
 (function () {
-  "use strict";
+ "use strict";
 
-  async function processImage(imageRecord, opts = {}) {
-    const { targetLang = "en", sourceLang = "ja", fontStyle = "anime", onProgress = null } = opts;
-    const imageId = imageRecord.id;
-    const imageUrl = imageRecord.original_url;
-    const userId = imageRecord.user_id;
+ async function processImage(imageRecord, opts = {}) {
+   const { targetLang = "en", sourceLang = "ja", fontStyle = "anime", onProgress = null } = opts;
+   const imageId = imageRecord.id;
+   const imageUrl = imageRecord.original_url;
+   const userId = imageRecord.user_id;
 
-    if (!imageUrl) {
-      report(onProgress, "error", "start", "No image URL");
-      return { success: false, error: "No image URL" };
-    }
+   if (!imageUrl) {
+     report(onProgress, "error", "start", "No image URL");
+     return { success: false, error: "No image URL" };
+   }
 
-    try {
-      // ═══ STEP 1: OCR (3 engines in parallel) ═══
-      report(onProgress, "ocr", "start", "Detecting text...");
+   try {
+     // ═══ STEP 1: OCR ═══
+     report(onProgress, "ocr", "start", "Detecting text…");
 
-      const [mOCR, ocrS, tess] = await Promise.allSettled([
-        callTextOnlyOCR(imageUrl, sourceLang),
-        callOCRWithBoxes(imageUrl, sourceLang),
-        KageOCR.recognize(imageUrl, sourceLang, (p) =>
-          report(onProgress, "ocr", "start", p.status || "Running local OCR...")
-        ),
-      ]);
+     const isJapanese = sourceLang === "ja" || sourceLang === "jpn";
 
-      let text = "", boxes = [], engines = [];
+     const promises = [
+       callOCRWithBoxes(imageUrl, sourceLang),
+       KageOCR.recognize(imageUrl, sourceLang,
+         (p) => report(onProgress, "ocr", "start", p.status || "Running local OCR…")),
+     ];
+     if (isJapanese) {
+       promises.push(callTextOnlyOCR(imageUrl, sourceLang));
+     }
 
-      // HF Space manga-ocr — only use for Japanese (otherwise returns garbled)
-      const isJapanese = sourceLang === "ja" || sourceLang === "jpn";
-      if (isOK(mOCR) && mOCR.value?.text && isJapanese) {
-        text = mOCR.value.text;
-        engines.push("manga-ocr-space");
-      }
+     const results = await Promise.allSettled(promises);
+     const ocrS = results[0];
+     const tess = results[1];
+     const mOCR = isJapanese ? results[2] : null;
 
-      // OCR.space (text + boxes)
-      if (isOK(ocrS) && ocrS.value && !ocrS.value.error) {
-        if (ocrS.value.boxes?.length) boxes = ocrS.value.boxes;
-        if (!text && ocrS.value.text) text = ocrS.value.text;
-        if (!engines.includes("manga-ocr-space")) engines.push("ocrspace");
-      }
+     let text = "";
+     let boxes = [];
+     const engines = [];
 
-      // Tesseract.js (boxes + fallback text)
-      if (isOK(tess) && tess.value?.boxes?.length) {
-        if (!boxes.length) {
-          boxes = tess.value.boxes;
-          // Assign manga-ocr text to Tesseract boxes by Y position
-          if (mOCR.value?.lines && isJapanese) boxes = assignLinesToBoxes(mOCR.value.lines, boxes);
-        } else {
-          for (const b of tess.value.boxes)
-            if (b.text?.trim() && !boxes.some((e) => overlap(e, b))) boxes.push(b);
-        }
-        if (!text) { text = tess.value.text; engines.push("tesseract-text"); }
-        else engines.push("tesseract-boxes");
-      }
+     // ── Decide on TEXT ──
+     if (isJapanese && isOK(mOCR) && mOCR.value?.text) {
+       text = mOCR.value.text;
+       engines.push("manga-ocr");
+     }
 
-      text = text.trim();
-      if (!text || !boxes.length) {
-        report(onProgress, "ocr", "error", "No text detected");
-        await db(imageId, userId, "failed", { error_message: "No text detected" });
-        return { success: false, error: "No text detected" };
-      }
+     if (!text && isOK(ocrS) && ocrS.value?.text && !ocrS.value.error) {
+       text = ocrS.value.text;
+       engines.push("ocrspace-text");
+     }
 
-      // Group word-level boxes into line-level boxes for better rendering
-      const grouped = groupWordsIntoLines(boxes);
-      boxes = grouped;
-      // Regenerate text from grouped boxes for cleaner translation
-      text = grouped.map(b => b.text || "").filter(Boolean).join("\n");
+     if (!text && isOK(tess) && tess.value?.text) {
+       text = tess.value.text;
+       engines.push("tesseract-text");
+     }
 
-      report(onProgress, "ocr", "done", `${boxes.length} regions · ${engines.join("+")}`);
-      await db(imageId, userId, "ocr_done", { ocr_text: text, boxes: JSON.stringify(boxes) });
+     // ── Decide on BOXES ──
+     if (isOK(ocrS) && ocrS.value?.boxes?.length && !ocrS.value.error) {
+       boxes = ocrS.value.boxes;
+       if (!engines.some(e => e.startsWith("ocrspace"))) engines.push("ocrspace-boxes");
+     } else if (isOK(tess) && tess.value?.boxes?.length) {
+       boxes = tess.value.boxes;
+       if (!text) text = tess.value.text || "";
+       if (!engines.includes("manga-ocr") && !engines.some(e => e.startsWith("ocrspace-text"))) {
+         text = tess.value.text || text;
+       }
+       engines.push("tesseract-boxes");
+     }
 
-      // ═══ STEP 2: Translate ═══
-      report(onProgress, "translate", "start", "Translating...");
-      const tr = await translate(text, sourceLang, targetLang);
-      if (!tr || tr.error) {
-        report(onProgress, "translate", "error", tr?.error || "failed");
-        await db(imageId, userId, "failed", { error_message: "Translation failed" });
-        return { success: false, error: "Translation failed" };
-      }
-      report(onProgress, "translate", "done", tr.engine || "done");
-      await db(imageId, userId, "translating_done", { translated_text: tr.translatedText });
+     text = text.trim();
+     if (!text || !boxes.length) {
+       report(onProgress, "ocr", "error", "No text detected");
+       await db(imageId, userId, "failed", { error_message: "No text detected" });
+       return { success: false, error: "No text detected" };
+     }
 
-      // ═══ STEP 3: Inpaint ═══
-      report(onProgress, "inpaint", "start", "Cleaning bubbles...");
-      let cleanedBlob;
-      try { cleanedBlob = await KageInpaint.inpaint(imageUrl, boxes); }
-      catch (e) {
-        report(onProgress, "inpaint", "error", e.message);
-        await db(imageId, userId, "failed", { error_message: "Inpaint failed" });
-        return { success: false, error: e.message };
-      }
-      report(onProgress, "inpaint", "done", "Bubbles cleaned");
+     boxes = groupWordsIntoLines(boxes);
 
-      // Upload cleaned image
-      let cleanedUrl = imageUrl;
-      try {
-        const c = KageAuth?.getSupabaseClient?.();
-        if (c) {
-          const p = `${userId}/cleaned/${imageId}_c.png`;
-          await c.storage.from("translated").upload(p, cleanedBlob, { contentType: "image/png", upsert: true });
-          cleanedUrl = c.storage.from("translated").getPublicUrl(p).data?.publicUrl || imageUrl;
-        }
-      } catch (_) { cleanedUrl = URL.createObjectURL(cleanedBlob); }
+     if (!engines.includes("manga-ocr")) {
+       text = boxes.map(b => b.text || "").filter(Boolean).join("\n");
+     }
 
-      await db(imageId, userId, "inpainting_done", { cleaned_url: cleanedUrl });
+     report(onProgress, "ocr", "done", `${boxes.length} regions · ${engines.join("+")}`);
+     await db(imageId, userId, "ocr_done", { ocr_text: text, boxes: JSON.stringify(boxes) });
 
-      // ═══ STEP 4: Render ═══
-      report(onProgress, "render", "start", "Rendering text...");
-      const rendered = await renderText(cleanedUrl, boxes, tr.translatedText, fontStyle);
-      if (!rendered) {
-        report(onProgress, "render", "error", "Render failed");
-        await db(imageId, userId, "failed", { error_message: "Render failed" });
-        return { success: false, error: "Render failed" };
-      }
-      report(onProgress, "render", "done", "Rendered");
+     // ═══ STEP 2: Translate ═══
+     report(onProgress, "translate", "start", "Translating…");
+     const tr = await translate(text, sourceLang, targetLang);
+     if (!tr || tr.error) {
+       report(onProgress, "translate", "error", tr?.error || "failed");
+       await db(imageId, userId, "failed", { error_message: "Translation failed" });
+       return { success: false, error: "Translation failed" };
+     }
+     report(onProgress, "translate", "done", tr.engine || "done");
+     await db(imageId, userId, "translating_done", { translated_text: tr.translatedText });
 
-      // ═══ STEP 5: Save ═══
-      report(onProgress, "finalize", "start", "Saving...");
-      const c = KageAuth?.getSupabaseClient?.();
-      if (!c) return { success: false, error: "Not authenticated" };
+     // ═══ STEP 3: Inpaint ═══
+     report(onProgress, "inpaint", "start", "Cleaning bubbles…");
+     let cleanedBlob;
+     try { cleanedBlob = await KageInpaint.inpaint(imageUrl, boxes); }
+     catch (e) {
+       report(onProgress, "inpaint", "error", e.message);
+       await db(imageId, userId, "failed", { error_message: "Inpaint failed" });
+       return { success: false, error: e.message };
+     }
+     report(onProgress, "inpaint", "done", "Bubbles cleaned");
 
-      const fp = `${userId}/translated/${imageId}_final.png`;
-      const { error: ue } = await c.storage.from("translated").upload(fp, rendered, { contentType: "image/png", upsert: true });
-      if (ue) { report(onProgress, "finalize", "error", ue.message); return { success: false, error: ue.message }; }
+     let cleanedUrl = imageUrl;
+     try {
+       const c = KageAuth?.getSupabaseClient?.();
+       if (c) {
+         const p = `${userId}/cleaned/${imageId}_c.png`;
+         await c.storage.from("translated").upload(p, cleanedBlob, { contentType: "image/png", upsert: true });
+         cleanedUrl = c.storage.from("translated").getPublicUrl(p).data?.publicUrl || imageUrl;
+       }
+     } catch (_) { cleanedUrl = URL.createObjectURL(cleanedBlob); }
 
-      const finalUrl = c.storage.from("translated").getPublicUrl(fp).data?.publicUrl || "";
-      await db(imageId, userId, "completed", { translated_url: finalUrl });
-      report(onProgress, "finalize", "done", "Complete!");
+     await db(imageId, userId, "inpainting_done", { cleaned_url: cleanedUrl });
 
-      return { success: true, translatedUrl: finalUrl };
-    } catch (e) {
-      report(onProgress, "error", "error", e.message);
-      await db(imageId, userId, "failed", { error_message: e.message });
-      return { success: false, error: e.message };
-    }
-  }
+     // ═══ STEP 4: Render ═══
+     report(onProgress, "render", "start", "Rendering text…");
+     const rendered = await renderText(cleanedUrl, boxes, tr.translatedText, fontStyle);
+     if (!rendered) {
+       report(onProgress, "render", "error", "Render failed");
+       await db(imageId, userId, "failed", { error_message: "Render failed" });
+       return { success: false, error: "Render failed" };
+     }
+     report(onProgress, "render", "done", "Rendered");
 
-  // ─── API helpers ───
+     // ═══ STEP 5: Save ═══
+     report(onProgress, "finalize", "start", "Saving…");
+     const c = KageAuth?.getSupabaseClient?.();
+     if (!c) return { success: false, error: "Not authenticated" };
 
-  async function callTextOnlyOCR(url, lang) {
-    try {
-      const r = await fetch("/api/ocr", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageUrl: url, sourceLang: lang, mode: "text_only" }) });
-      return await r.json();
-    } catch (_) { return null; }
-  }
+     const fp = `${userId}/translated/${imageId}_final.png`;
+     const { error: ue } = await c.storage.from("translated").upload(fp, rendered, { contentType: "image/png", upsert: true });
+     if (ue) { report(onProgress, "finalize", "error", ue.message); return { success: false, error: ue.message }; }
 
-  async function callOCRWithBoxes(url, lang) {
-    try {
-      const r = await fetch("/api/ocr", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageUrl: url, sourceLang: lang, mode: "full" }) });
-      return await r.json();
-    } catch (_) { return { error: "unreachable" }; }
-  }
+     const finalUrl = c.storage.from("translated").getPublicUrl(fp).data?.publicUrl || "";
+     await db(imageId, userId, "completed", { translated_url: finalUrl });
+     report(onProgress, "finalize", "done", "Complete!");
 
-  async function translate(text, src, tgt) {
-    if (src === tgt || (src === "en" && tgt === "en")) return { translatedText: text, engine: "passthrough" };
-    try {
-      const r = await fetch("/api/translate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, sourceLang: src, targetLang: tgt }) });
-      return await r.json();
-    } catch (_) { return { error: "unreachable" }; }
-  }
+     return { success: true, translatedUrl: finalUrl };
+   } catch (e) {
+     report(onProgress, "error", "error", e.message);
+     await db(imageId, userId, "failed", { error_message: e.message });
+     return { success: false, error: e.message };
+   }
+ }
 
-  // ─── Box math ───
+ // ─── API helpers ───
 
-  function overlap(a, b) {
-    const ax1 = a.x || 0, ay1 = a.y || 0, ax2 = ax1 + (a.w || 50), ay2 = ay1 + (a.h || 20);
-    const bx1 = b.x || 0, by1 = b.y || 0, bx2 = bx1 + (b.w || 50), by2 = by1 + (b.h || 20);
-    const ix1 = Math.max(ax1, bx1), iy1 = Math.max(ay1, by1), ix2 = Math.min(ax2, bx2), iy2 = Math.min(ay2, by2);
-    if (ix1 >= ix2 || iy1 >= iy2) return false;
-    const iArea = (ix2 - ix1) * (iy2 - iy1);
-    return (iArea / Math.min((ax2 - ax1) * (ay2 - ay1), (bx2 - bx1) * (by2 - by1))) > 0.3;
-  }
+ async function callTextOnlyOCR(url, lang) {
+   try {
+     const r = await fetch("/api/ocr", {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ imageUrl: url, sourceLang: lang, mode: "text_only" }),
+     });
+     return await r.json();
+   } catch (_) { return null; }
+ }
 
-  /**
-   * Group word-level boxes into line-level boxes.
-   * OCR.space returns per-word boxes; this merges adjacent words on the same row
-   * into a single wider box, so translated text has room to fit.
-   */
-  function groupWordsIntoLines(boxes) {
-    if (!boxes.length) return boxes;
-    
-    // Sort by Y position (top to bottom), then X (left to right)
-    const sorted = [...boxes].sort((a, b) => {
-      const yDiff = (a.y || 0) - (b.y || 0);
-      if (Math.abs(yDiff) < 5) return (a.x || 0) - (b.x || 0);
-      return yDiff;
-    });
+ async function callOCRWithBoxes(url, lang) {
+   try {
+     const r = await fetch("/api/ocr", {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ imageUrl: url, sourceLang: lang, mode: "full" }),
+     });
+     return await r.json();
+   } catch (_) { return { error: "unreachable" }; }
+ }
 
-    const lines = [];
-    let current = null;
+ async function translate(text, src, tgt) {
+   if (src === tgt || (src === "en" && tgt === "en")) return { translatedText: text, engine: "passthrough" };
+   try {
+     const r = await fetch("/api/translate", {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ text, sourceLang: src, targetLang: tgt }),
+     });
+     return await r.json();
+   } catch (_) { return { error: "unreachable" }; }
+ }
 
-    for (const box of sorted) {
-      if (!current) {
-        current = { ...box };
-        continue;
-      }
+ // ─── Box grouping ───
 
-      // Same line if Y positions are within 8px
-      const yDist = Math.abs((box.y || 0) - (current.y || 0));
-      const xGap = (box.x || 0) - ((current.x || 0) + (current.w || 0));
+ function groupWordsIntoLines(boxes) {
+   if (!boxes.length) return boxes;
 
-      if (yDist < 8 && xGap < 25 && xGap > -5) {
-        // Same line — merge boxes
-        const newRight = Math.max(
-          (current.x || 0) + (current.w || 0),
-          (box.x || 0) + (box.w || 0)
-        );
-        current.w = newRight - (current.x || 0);
-        current.h = Math.max(current.h || 0, box.h || 0);
-        current.y = Math.min(current.y || 0, box.y || 0);
-        current.text = (current.text || "") + " " + (box.text || "");
-      } else {
-        // New line
-        lines.push(current);
-        current = { ...box };
-      }
-    }
-    if (current) lines.push(current);
+   const Y_THRESHOLD = 15;
+   const X_GAP_MAX = 40;
+   const X_GAP_MIN = -15;
 
-    return lines;
-  }
+   const sorted = [...boxes].sort((a, b) => {
+     const yDiff = (a.y || 0) - (b.y || 0);
+     if (Math.abs(yDiff) < Y_THRESHOLD) return (a.x || 0) - (b.x || 0);
+     return yDiff;
+   });
 
-  function assignLinesToBoxes(lines, boxes) {
-    const sorted = [...boxes].sort((a, b) => (a.y || 0) - (b.y || 0));
-    for (let i = 0; i < Math.min(lines.length, sorted.length); i++)
-      sorted[i].text = lines[i];
-    return sorted;
-  }
+   const lines = [];
+   let current = null;
 
-  function isOK(r) { return r.status === "fulfilled" && r.value; }
+   for (const box of sorted) {
+     if (!current) {
+       current = { ...box };
+       continue;
+     }
 
-  // ─── Render ───
+     const yDist = Math.abs((box.y || 0) - (current.y || 0));
+     const xGap = (box.x || 0) - ((current.x || 0) + (current.w || 0));
 
-  function renderText(imageUrl, boxes, translatedText, fontStyle) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.onload = () => {
-        const c = document.createElement("canvas");
-        c.width = img.naturalWidth; c.height = img.naturalHeight;
-        const ctx = c.getContext("2d");
-        ctx.drawImage(img, 0, 0);
+     if (yDist < Y_THRESHOLD && xGap < X_GAP_MAX && xGap > X_GAP_MIN) {
+       const newRight = Math.max(
+         (current.x || 0) + (current.w || 0),
+         (box.x || 0) + (box.w || 0)
+       );
+       current.w = newRight - (current.x || 0);
+       current.h = Math.max(current.h || 0, box.h || 0);
+       current.y = Math.min(current.y || 0, box.y || 0);
+       current.text = (current.text || "") + " " + (box.text || "");
+     } else {
+       lines.push(current);
+       current = { ...box };
+     }
+   }
+   if (current) lines.push(current);
 
-        const lines = translatedText.split("\n").filter(Boolean);
-        const fonts = { anime: "Comic Sans MS, cursive", manga: "Impact, sans-serif", mincho: "Noto Serif JP, serif", gothic: "Noto Sans JP, sans-serif", hand: "Bradley Hand, cursive", pixel: "Courier New, monospace" };
-        const ff = fonts[fontStyle] || fonts.anime;
+   return lines;
+ }
 
-        for (let i = 0; i < Math.min(boxes.length, lines.length); i++) {
-          const b = boxes[i], t = lines[i];
-          if (!b || !t) continue;
-          const fs = fit(ctx, t, b.w || 100, b.h || 30, ff);
-          if (fs < 6) continue;
+ function isOK(r) {
+   return r && r.status === "fulfilled" && r.value != null;
+ }
 
-          ctx.save();
-          ctx.font = `bold ${fs}px "${ff}"`;
-          ctx.textBaseline = "middle";
-          ctx.textAlign = "center";
-          ctx.strokeStyle = "rgba(0,0,0,0.85)";
-          ctx.lineWidth = Math.max(1.5, fs / 16);
-          ctx.lineJoin = "round";
+ // ─── Render ───
 
-          const cy = (b.y || 0) + (b.h || 0) / 2;
-          const cx = (b.x || 0) + (b.w || 0) / 2;
-          const wl = wrap(ctx, t, (b.w || 100) - 10);
-          const lh = fs * 1.35;
-          const sy = cy - ((wl.length - 1) * lh) / 2;
+ function renderText(imageUrl, boxes, translatedText, fontStyle) {
+   return new Promise((resolve) => {
+     const img = new Image();
+     img.crossOrigin = "anonymous";
+     img.onload = () => {
+       const c = document.createElement("canvas");
+       c.width = img.naturalWidth;
+       c.height = img.naturalHeight;
+       const ctx = c.getContext("2d");
+       ctx.drawImage(img, 0, 0);
 
-          for (let j = 0; j < wl.length; j++) {
-            const ly = sy + j * lh;
-            ctx.strokeText(wl[j], cx, ly);
-            ctx.fillStyle = "white";
-            ctx.fillText(wl[j], cx, ly);
-          }
-          ctx.restore();
-        }
-        c.toBlob((blob) => resolve(blob), "image/png");
-      };
-      img.onerror = () => resolve(null);
-      img.src = imageUrl;
-    });
-  }
+       const lines = translatedText.split("\n").filter(Boolean);
+       const fonts = {
+         anime: "Comic Sans MS, cursive",
+         manga: "Impact, sans-serif",
+         mincho: "Noto Serif JP, serif",
+         gothic: "Noto Sans JP, sans-serif",
+         hand: "Bradley Hand, cursive",
+         pixel: "Courier New, monospace",
+       };
+       const ff = fonts[fontStyle] || fonts.anime;
 
-  function fit(ctx, text, mw, mh, ff) {
-    let fs = Math.min(mh * 0.55, 32);
-    while (fs > 7) {
-      ctx.font = `bold ${fs}px "${ff}"`;
-      if (wrap(ctx, text, mw - 12).length * fs * 1.35 <= mh * 0.85) break;
-      fs--;
-    }
-    return Math.max(7, Math.round(fs));
-  }
+       for (let i = 0; i < Math.min(boxes.length, lines.length); i++) {
+         const b = boxes[i];
+         const t = lines[i];
+         if (!b || !t) continue;
 
-  function wrap(ctx, text, mw) {
-    const words = text.split(/\s+/), lines = [];
-    let cur = "";
-    for (const w of words) {
-      const t = cur ? cur + " " + w : w;
-      if (ctx.measureText(t).width > mw && cur) { lines.push(cur); cur = w; }
-      else cur = t;
-    }
-    if (cur) lines.push(cur);
-    if (lines.length === 1 && lines[0].length > 5) {
-      const cjk = []; let cl = "";
-      for (const ch of lines[0]) {
-        if (ctx.measureText(cl + ch).width > mw && cl) { cjk.push(cl); cl = ch; }
-        else cl += ch;
-      }
-      if (cl) cjk.push(cl);
-      if (cjk.length > 1) return cjk;
-    }
-    return lines;
-  }
+         const fs = fit(ctx, t, b.w || 100, b.h || 30, ff);
+         if (fs < 6) continue;
 
-  // ─── DB ───
+         ctx.save();
+         ctx.font = `bold ${fs}px "${ff}"`;
+         ctx.textBaseline = "middle";
+         ctx.textAlign = "center";
+         ctx.strokeStyle = "rgba(0,0,0,0.85)";
+         ctx.lineWidth = Math.max(1.5, fs / 16);
+         ctx.lineJoin = "round";
 
-  async function db(id, uid, status, extra = {}) {
-    const c = KageAuth?.getSupabaseClient?.();
-    if (!c) return;
-    await c.from("images").update({ status, updated_at: new Date().toISOString(), ...extra }).eq("id", id).eq("user_id", uid);
-  }
+         const cx = (b.x || 0) + (b.w || 0) / 2;
+         const cy = (b.y || 0) + (b.h || 0) / 2;
+         const wl = wrap(ctx, t, (b.w || 100) - 10);
+         const lh = fs * 1.35;
+         const sy = cy - ((wl.length - 1) * lh) / 2;
 
-  function report(fn, step, status, detail) { if (fn) fn(step, status, detail); }
+         for (let j = 0; j < wl.length; j++) {
+           const ly = sy + j * lh;
+           ctx.strokeText(wl[j], cx, ly);
+           ctx.fillStyle = "white";
+           ctx.fillText(wl[j], cx, ly);
+         }
+         ctx.restore();
+       }
 
-  window.KagePipeline = { processImage, renderText };
+       c.toBlob((blob) => resolve(blob), "image/png");
+     };
+     img.onerror = () => resolve(null);
+     img.src = imageUrl;
+   });
+ }
+
+ function fit(ctx, text, mw, mh, ff) {
+   let fs = Math.min(mh * 0.55, 32);
+   while (fs > 7) {
+     ctx.font = `bold ${fs}px "${ff}"`;
+     if (wrap(ctx, text, mw - 12).length * fs * 1.35 <= mh * 0.85) break;
+     fs--;
+   }
+   return Math.max(7, Math.round(fs));
+ }
+
+ function wrap(ctx, text, mw) {
+   const words = text.split(/\s+/);
+   const lines = [];
+   let cur = "";
+   for (const w of words) {
+     const t = cur ? cur + " " + w : w;
+     if (ctx.measureText(t).width > mw && cur) { lines.push(cur); cur = w; }
+     else cur = t;
+   }
+   if (cur) lines.push(cur);
+   if (lines.length === 1 && lines[0].length > 5) {
+     const cjk = []; let cl = "";
+     for (const ch of lines[0]) {
+       if (ctx.measureText(cl + ch).width > mw && cl) { cjk.push(cl); cl = ch; }
+       else cl += ch;
+     }
+     if (cl) cjk.push(cl);
+     if (cjk.length > 1) return cjk;
+   }
+   return lines;
+ }
+
+ // ─── DB ───
+
+ async function db(id, uid, status, extra = {}) {
+   const c = KageAuth?.getSupabaseClient?.();
+   if (!c) return;
+   await c.from("images").update({
+     status,
+     updated_at: new Date().toISOString(),
+     ...extra,
+   }).eq("id", id).eq("user_id", uid);
+ }
+
+ function report(fn, step, status, detail) {
+   if (fn) fn(step, status, detail);
+ }
+
+ window.KagePipeline = { processImage, renderText };
 })();
